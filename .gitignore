@@ -1,0 +1,20 @@
+# sbt / Scala build artifacts
+target/
+project/target/
+project/project/
+.bsp/
+
+# Chisel test runtime outputs
+test_run_dir/
+
+# Generated Verilog (can be regenerated)
+generated/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
