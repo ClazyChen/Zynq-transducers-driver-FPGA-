@@ -18,3 +18,25 @@ generated/
 # OS
 .DS_Store
 Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# PySide6 / Qt
+*.pyc
+*.pyo
+
+# Model checkpoints (large binary files)
+*.pth
+*.pt
+*.ckpt
+
+# Test outputs (images, metadata) - .bin kept for Scala loopback tests
+host/loopback_output/*.png
+host/loopback_output/*.json
+host/test_field.png

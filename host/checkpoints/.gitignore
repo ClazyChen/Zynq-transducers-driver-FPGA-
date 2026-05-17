@@ -1,0 +1,5 @@
+# Model checkpoints are large binary files; do not commit to git.
+# Place your checkpoint_best.pth here manually.
+*.pth
+*.pt
+*.ckpt
