@@ -12,11 +12,21 @@ import numpy as np
 from PySide6.QtCore import QCoreApplication
 
 from algorithms.engine import UNetEngine, GSPATEngine
-from algorithms.field_builder_torch import FieldBuilderTorch
 from core.device_client import DeviceClient
 from core.renderer import RenderController
 
 import config as cfg
+
+
+def _expand_burst_frames(captured: list) -> list:
+    """Flatten send_burst captures into per-frame (cycle_index, rows) list."""
+    frames = []
+    for batch in captured:
+        for i in range(batch.shape[0]):
+            rows = batch[i]
+            ci = (rows[0] >> 16) & 0xFFFF
+            frames.append((ci, rows.copy()))
+    return frames
 
 
 def test_renderer_static():
@@ -27,13 +37,8 @@ def test_renderer_static():
     client = DeviceClient(mock=True)
     client.connect()
 
-    fb = FieldBuilderTorch(
-        f=cfg.F, array_width=cfg.ARRAY_WIDTH, array_height=cfg.ARRAY_HEIGHT,
-        d=cfg.D, z=cfg.Z, image_resolution=cfg.IMAGE_RESOLUTION,
-        image_size=cfg.IMAGE_SIZE, c=cfg.c,
-    )
-
-    renderer = RenderController(unet, gs, client, fb)
+    # Skip field visualization in loop for throughput (GUI uses field_builder separately)
+    renderer = RenderController(unet, gs, client, field_builder=None)
     renderer.configure(
         foci=[(64.0, 64.0), (70.0, 70.0)],
         mode="static",
@@ -45,30 +50,36 @@ def test_renderer_static():
         dwell_time_ms=500,
     )
 
-    # Collect a few frames
-    frames = []
-    orig_send = client.send_frame
+    captured = []
+    orig_send_burst = client.send_burst
 
-    def capture_send(ci, rows):
-        frames.append((ci, rows.copy()))
-        return orig_send(ci, rows)
+    def capture_burst(batch):
+        captured.append(batch.copy())
+        return orig_send_burst(batch)
 
-    client.send_frame = capture_send
+    client.send_burst = capture_burst
 
     renderer.start()
-    time.sleep(0.5)  # Let it run for 0.5s (~150 frames at 300Hz)
+    time.sleep(1.0)
     renderer.stop()
 
-    print(f"  Captured {len(frames)} frames")
-    assert len(frames) >= 30, f"Expected >=30 frames, got {len(frames)}"
+    frames = _expand_burst_frames(captured)
+    print(f"  Captured {len(frames)} frames in {len(captured)} bursts")
+    prime_min = int(cfg.BURST_NOMINAL_FRAMES * cfg.BURST_PRIME_MULTIPLIER)
+    assert captured[0].shape[0] >= prime_min, (
+        f"First burst expected >={prime_min} frames, got {captured[0].shape[0]}"
+    )
+    assert len(captured) >= 2, f"Expected multiple bursts, got {len(captured)}"
+    assert len(frames) >= 2000, f"Expected >=2000 frames in 1.0s, got {len(frames)}"
+    assert len(frames) <= 50000, f"Expected <=50000 frames in 1.0s, got {len(frames)}"
 
-    # Verify cycle index continuity
     cis = [f[0] for f in frames]
     for i in range(1, len(cis)):
-        expected = (cis[i-1] + 1) & 0xFFFF
-        assert cis[i] == expected, f"Cycle index discontinuity at frame {i}: {cis[i-1]} -> {cis[i]}"
+        expected = (cis[i - 1] + 1) & 0xFFFF
+        assert cis[i] == expected, (
+            f"Cycle index discontinuity at frame {i}: {cis[i-1]} -> {cis[i]}"
+        )
 
-    # Verify BRAM row format
     _, first_rows = frames[0]
     assert first_rows.shape == (64,), f"Expected (64,), got {first_rows.shape}"
     assert first_rows.dtype == np.uint32
@@ -90,7 +101,7 @@ def test_renderer_dynamic():
     gs = GSPATEngine()
     client = DeviceClient(mock=True)
     client.connect()
-    fb = None  # Skip visualization for speed
+    fb = None
 
     renderer = RenderController(unet, gs, client, fb)
     renderer.configure(
@@ -104,21 +115,24 @@ def test_renderer_dynamic():
         dwell_time_ms=200,
     )
 
-    frames = []
-    orig_send = client.send_frame
+    captured = []
+    orig_send_burst = client.send_burst
 
-    def capture_send(ci, rows):
-        frames.append((ci, rows.copy()))
-        return orig_send(ci, rows)
+    def capture_burst(batch):
+        captured.append(batch.copy())
+        return orig_send_burst(batch)
 
-    client.send_frame = capture_send
+    client.send_burst = capture_burst
 
     renderer.start()
     time.sleep(1.0)
     renderer.stop()
 
-    print(f"  Captured {len(frames)} frames")
-    assert len(frames) > 100
+    frames = _expand_burst_frames(captured)
+    print(f"  Captured {len(frames)} frames in {len(captured)} bursts")
+    assert len(captured) >= 2, f"Expected multiple bursts, got {len(captured)}"
+    assert len(frames) >= 2000, f"Expected >=2000 frames in 1.0s, got {len(frames)}"
+    assert len(frames) <= 50000, f"Expected <=50000 frames in 1.0s, got {len(frames)}"
 
     print("  Dynamic mode OK\n")
     return True

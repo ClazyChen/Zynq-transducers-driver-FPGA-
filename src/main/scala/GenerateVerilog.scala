@@ -14,7 +14,7 @@ object GenerateVerilog extends App {
             srclkHighCycs = 5,
             rclkHighCycs = 5,
             cycleCycs = 2500,
-            bramDepth = 1024
+            bramDepth = 262144
         ),
         Array("--target-dir", "generated"),
         Array("--preserve-aggregate=1d-vec", "--disable-all-randomization")

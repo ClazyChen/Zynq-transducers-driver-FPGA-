@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from PySide6.QtCore import QObject, Signal
 
+import config as cfg
 from algorithms.engine import UNetEngine, GSPATEngine
 from algorithms.field_builder_torch import FieldBuilderTorch
 from .converter import ControlMatrixConverter
@@ -20,13 +21,11 @@ from .device_client import DeviceClient
 class RenderController(QObject):
     """Real-time render controller running in a background thread."""
 
-    # Signals for GUI updates (thread-safe via Qt queued connections)
-    # Using object instead of np.ndarray to avoid cross-thread type marshalling issues.
-    field_visualization = Signal(object)       # intensity field (128, 128) float32
+    field_visualization = Signal(object)
     status_message = Signal(str)
     fps_updated = Signal(float)
     connection_status = Signal(str)
-    current_focus_info = Signal(str)           # e.g. "Focus 1/3"
+    current_focus_info = Signal(str)
 
     def __init__(
         self,
@@ -39,31 +38,31 @@ class RenderController(QObject):
         self.unet_engine = unet_engine
         self.gs_pat_engine = gs_pat_engine
         self.device_client = device_client
-        self.converter = ControlMatrixConverter(div=30)
+        self.converter = ControlMatrixConverter(div=cfg.DIV)
         self.field_builder = field_builder
 
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
-        # Configuration defaults
         self.foci: List[Tuple[float, float]] = []
-        self.mode: str = "static"          # "static" or "dynamic"
-        self.algorithm: str = "unet"       # "unet" or "gs_pat"
-        self.lm_freq: float = 25.0         # Hz
-        self.lm_amp: float = 4.0           # mm
-        self.lm_samples: int = 12          # samples per LM period
-        self.lm_direction: str = "x"       # "x" or "y"
-        self.dwell_time_ms: float = 500.0  # ms per focus in dynamic mode
+        self.mode: str = "static"
+        self.algorithm: str = "unet"
+        self.lm_freq: float = 25.0
+        self.lm_amp: float = 4.0
+        self.lm_samples: int = 12
+        self.lm_direction: str = "x"
+        self.dwell_time_ms: float = 500.0
 
-        # Precomputed playback data
         self._precomputed_phases: Optional[np.ndarray] = None
         self._precomputed_amplitudes: Optional[np.ndarray] = None
         self._playback_sequence: Optional[List[int]] = None
         self._dynamic_focus_data: Optional[List[Dict]] = None
+        self._frames_per_lm_step: int = 1
+        self._frames_per_dwell: int = 1
         self._cycle_index = 1
+        self._first_burst = True
 
-        # Visualization throttling
-        self._viz_interval = 1.0 / 30.0    # 30 FPS max for GUI
+        self._viz_interval = 1.0 / cfg.FIELD_VISUALIZATION_FPS
         self._last_viz_time = 0.0
 
     def configure(
@@ -103,6 +102,15 @@ class RenderController(QObject):
 
     def _precompute(self):
         """Precompute LM trajectories and run batch inference."""
+        self._frames_per_lm_step = max(
+            1,
+            int(round(cfg.DEVICE_SAMPLE_RATE / (self.lm_freq * self.lm_samples))),
+        )
+        self._frames_per_dwell = max(
+            1,
+            int(round(self.dwell_time_ms * 1e-3 * cfg.DEVICE_SAMPLE_RATE)),
+        )
+
         N = self.lm_samples
         dt = 1.0 / (self.lm_freq * N)
         t = np.arange(N) * dt
@@ -127,7 +135,7 @@ class RenderController(QObject):
             self._playback_sequence = sequence
             self._dynamic_focus_data = None
 
-        else:  # dynamic
+        else:
             all_unique_configs = []
             per_focus_meta = []
 
@@ -165,34 +173,64 @@ class RenderController(QObject):
 
     def _deduplicate_configs(
         self,
-        configs: List[List[Tuple[float, float]]]
+        configs: List[List[Tuple[float, float]]],
     ) -> Tuple[List[List[Tuple[float, float]]], List[int]]:
-        """Deduplicate focus configurations and return index mapping."""
         seen: Dict[tuple, int] = {}
         unique: List[List[Tuple[float, float]]] = []
         sequence: List[int] = []
-        for cfg in configs:
-            key = tuple((round(float(x), 6), round(float(y), 6)) for x, y in cfg)
+        for cfg_item in configs:
+            key = tuple((round(float(x), 6), round(float(y), 6)) for x, y in cfg_item)
             if key not in seen:
                 seen[key] = len(unique)
-                unique.append(cfg)
+                unique.append(cfg_item)
             sequence.append(seen[key])
         return unique, sequence
 
     def _infer_batch(
         self,
-        configs: List[List[Tuple[float, float]]]
+        configs: List[List[Tuple[float, float]]],
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Run batch inference on focus configurations."""
         if not configs:
             return np.zeros((0, 8, 8)), np.zeros((0, 8, 8))
         if self.algorithm == "unet":
             return self.unet_engine.infer(configs)
-        else:
-            return self.gs_pat_engine.infer(configs)
+        return self.gs_pat_engine.infer(configs)
+
+    def _resolve_pattern(self, frame_idx: int) -> Tuple[np.ndarray, np.ndarray, Optional[int]]:
+        """Return (phase, amplitude, focus_idx) for a global frame index."""
+        if self.mode == "static":
+            seq = self._playback_sequence
+            assert seq is not None
+            lm_step = (frame_idx // self._frames_per_lm_step) % len(seq)
+            si = seq[lm_step]
+            return (
+                self._precomputed_phases[si],
+                self._precomputed_amplitudes[si],
+                None,
+            )
+
+        assert self._dynamic_focus_data is not None
+        num_foci = len(self._dynamic_focus_data)
+        focus_idx = (frame_idx // self._frames_per_dwell) % num_foci
+        frame_in_dwell = frame_idx % self._frames_per_dwell
+        data = self._dynamic_focus_data[focus_idx]
+        seq = data["sequence"]
+        lm_step = (frame_in_dwell // self._frames_per_lm_step) % len(seq)
+        si = seq[lm_step]
+        return data["phases"][si], data["amplitudes"][si], focus_idx
+
+    def _build_batch(
+        self, global_frame_start: int, n: int
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        phase_batch = np.empty((n, 8, 8), dtype=np.float64)
+        amp_batch = np.empty((n, 8, 8), dtype=np.float64)
+        for i in range(n):
+            phase, amplitude, _ = self._resolve_pattern(global_frame_start + i)
+            phase_batch[i] = phase
+            amp_batch[i] = amplitude
+        return phase_batch, amp_batch
 
     def start(self):
-        """Start the rendering thread."""
         if self._thread is not None and self._thread.is_alive():
             return
         if self._precomputed_phases is None and self._dynamic_focus_data is None:
@@ -203,12 +241,12 @@ class RenderController(QObject):
 
         self._stop_event.clear()
         self._cycle_index = 1
-        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._first_burst = True
+        self._thread = threading.Thread(target=self._run_burst_loop, daemon=True)
         self._thread.start()
         self.status_message.emit("渲染已启动")
 
     def stop(self):
-        """Stop the rendering thread."""
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=1.0)
@@ -218,39 +256,56 @@ class RenderController(QObject):
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    def _run_loop(self):
-        """Main real-time rendering loop."""
-        target_interval = 1.0 / (self.lm_freq * self.lm_samples)
+    def _run_burst_loop(self):
+        """Send frames in bursts at ~40 kHz average rate."""
+        last_anchor = time.perf_counter()
+        global_frame = 0
         frame_count = 0
-        fps_start_time = time.perf_counter()
-
-        if self.mode == "static":
-            self._run_static_loop(target_interval, frame_count, fps_start_time)
-        else:
-            self._run_dynamic_loop(target_interval, frame_count, fps_start_time)
-
-    def _run_static_loop(self, target_interval: float, frame_count: int, fps_start_time: float):
-        """Static mode: cycle through precomputed sequence."""
-        seq = self._playback_sequence
-        phases = self._precomputed_phases
-        amplitudes = self._precomputed_amplitudes
-        N = len(seq)
-        idx = 0
+        fps_start_time = last_anchor
+        last_focus_idx: Optional[int] = None
 
         while not self._stop_event.is_set():
-            loop_start = time.perf_counter()
+            now = time.perf_counter()
+            sleep_time = (last_anchor + cfg.BURST_NOMINAL_INTERVAL) - now
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
-            si = seq[idx]
-            phase = phases[si]
-            amplitude = amplitudes[si]
+            now = time.perf_counter()
+            n = max(
+                cfg.BURST_MIN_FRAMES,
+                int(round((now - last_anchor) * cfg.DEVICE_SAMPLE_RATE)),
+            )
+            if self._first_burst:
+                prime_min = int(
+                    cfg.BURST_NOMINAL_FRAMES * cfg.BURST_PRIME_MULTIPLIER
+                )
+                n = max(n, prime_min)
+                self._first_burst = False
 
-            self._send_frame(phase, amplitude)
-            self._maybe_compute_field(phase, amplitude)
+            phase_batch, amp_batch = self._build_batch(global_frame, n)
+            bram_batch = self.converter.convert_batch(
+                phase_batch, amp_batch, self._cycle_index
+            )
 
-            idx = (idx + 1) % N
-            frame_count += 1
+            ok = self.device_client.send_burst(bram_batch)
+            if not ok:
+                self.connection_status.emit("发送失败")
+                break
 
-            # FPS calculation
+            if self.mode == "dynamic":
+                _, _, focus_idx = self._resolve_pattern(global_frame + n - 1)
+                if focus_idx is not None and focus_idx != last_focus_idx:
+                    last_focus_idx = focus_idx
+                    num_foci = len(self._dynamic_focus_data)
+                    self.current_focus_info.emit(f"焦点 {focus_idx + 1}/{num_foci}")
+
+            self._cycle_index = (self._cycle_index + n) & 0xFFFF
+            global_frame += n
+            last_anchor += n / cfg.DEVICE_SAMPLE_RATE
+
+            self._maybe_compute_field(phase_batch[-1], amp_batch[-1])
+
+            frame_count += n
             now = time.perf_counter()
             elapsed = now - fps_start_time
             if elapsed >= 1.0:
@@ -258,68 +313,8 @@ class RenderController(QObject):
                 self.fps_updated.emit(fps)
                 frame_count = 0
                 fps_start_time = now
-
-            # Precise timing
-            sleep_time = target_interval - (time.perf_counter() - loop_start)
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-
-    def _run_dynamic_loop(self, target_interval: float, frame_count: int, fps_start_time: float):
-        """Dynamic mode: dwell on each focus then switch."""
-        focus_idx = 0
-        focus_start_time = time.perf_counter()
-        num_foci = len(self._dynamic_focus_data)
-
-        while not self._stop_event.is_set():
-            loop_start = time.perf_counter()
-
-            # Check dwell time and switch focus if needed
-            elapsed_focus = (loop_start - focus_start_time) * 1000.0
-            if elapsed_focus >= self.dwell_time_ms:
-                focus_idx = (focus_idx + 1) % num_foci
-                focus_start_time = loop_start
-                self.current_focus_info.emit(f"焦点 {focus_idx + 1}/{num_foci}")
-
-            data = self._dynamic_focus_data[focus_idx]
-            seq = data["sequence"]
-            phases = data["phases"]
-            amplitudes = data["amplitudes"]
-            N = len(seq)
-
-            # Local frame index within current focus dwell period
-            # We want to cycle through the LM sequence continuously during dwell
-            local_idx = int(((loop_start - focus_start_time) * self.lm_freq * self.lm_samples)) % N
-            si = seq[local_idx]
-            phase = phases[si]
-            amplitude = amplitudes[si]
-
-            self._send_frame(phase, amplitude)
-            self._maybe_compute_field(phase, amplitude)
-
-            frame_count += 1
-            now = time.perf_counter()
-            elapsed = now - fps_start_time
-            if elapsed >= 1.0:
-                fps = frame_count / elapsed
-                self.fps_updated.emit(fps)
-                frame_count = 0
-                fps_start_time = now
-
-            sleep_time = target_interval - (time.perf_counter() - loop_start)
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-
-    def _send_frame(self, phase: np.ndarray, amplitude: np.ndarray):
-        """Convert and send a single frame."""
-        bram_rows = self.converter.convert(phase, amplitude, self._cycle_index)
-        ok = self.device_client.send_frame(self._cycle_index, bram_rows)
-        if ok:
-            self._cycle_index = (self._cycle_index + 1) & 0xFFFF
-        else:
-            self.connection_status.emit("发送失败")
 
     def _maybe_compute_field(self, phase: np.ndarray, amplitude: np.ndarray):
-        """Compute intensity field for visualization (throttled)."""
         if self.field_builder is None:
             return
         now = time.perf_counter()

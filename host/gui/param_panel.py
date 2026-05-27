@@ -98,12 +98,12 @@ class ParamPanel(QWidget):
         net_group = QGroupBox("设备网络")
         net_layout = QGridLayout()
         net_layout.addWidget(QLabel("IP 地址:"), 0, 0)
-        self._ip_edit = QLineEdit("192.168.1.10")
+        self._ip_edit = QLineEdit("192.168.1.20")
         net_layout.addWidget(self._ip_edit, 0, 1)
         net_layout.addWidget(QLabel("端口:"), 1, 0)
         self._port_edit = QSpinBox()
         self._port_edit.setRange(1, 65535)
-        self._port_edit.setValue(5000)
+        self._port_edit.setValue(55555)
         net_layout.addWidget(self._port_edit, 1, 1)
 
         self._btn_connect = QPushButton("连接")
@@ -130,7 +130,7 @@ class ParamPanel(QWidget):
         # Mock mode checkbox for debugging
         self._btn_mock = QPushButton("启用模拟模式（调试用）")
         self._btn_mock.setCheckable(True)
-        self._btn_mock.setChecked(True)
+        self._btn_mock.setChecked(False)
         layout.addWidget(self._btn_mock)
 
         layout.addStretch(1)

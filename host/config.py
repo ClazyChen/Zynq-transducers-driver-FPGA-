@@ -23,6 +23,15 @@ c = 343000.0                # Speed of sound (mm/s)
 # FPGA parameters
 DIV = 30                    # Number of frames per 40kHz cycle
 PHASE_DUTY_BITS = 5         # log2Ceil(DIV)
+BRAM_DEPTH = 262144         # BRAM words (4096 frame slots @ 64 words/frame)
+
+# Device streaming (40 kHz burst send to match FPGA consumption)
+DEVICE_SAMPLE_RATE = 40000.0
+BURST_NOMINAL_FRAMES = 512
+BURST_NOMINAL_INTERVAL = BURST_NOMINAL_FRAMES / DEVICE_SAMPLE_RATE  # 0.0128 s
+BURST_MIN_FRAMES = 1
+# First burst after Start uses max(delta_frames, BURST_NOMINAL_FRAMES * multiplier) to prime BRAM
+BURST_PRIME_MULTIPLIER = 2
 
 # LM (Lateral Modulation) defaults
 LM_DEFAULT_FREQUENCY = 25.0     # Hz
@@ -34,9 +43,9 @@ LM_DEFAULT_DIRECTION = "x"      # "x" or "y"
 MAX_FOCI = 3
 MAX_SAMPLE_RATE = 40000.0       # Hz, transducer native frequency
 
-# Network defaults
-DEFAULT_DEVICE_IP = "192.168.1.10"
-DEFAULT_DEVICE_PORT = 5000
+# Network defaults (align with PS lwIP server; see send_numbers.py)
+DEFAULT_DEVICE_IP = "192.168.1.20"
+DEFAULT_DEVICE_PORT = 55555
 
 # U-Net model parameters
 UNET_BASE_CHANNELS = 32         # User explicitly says U-Net(32b)

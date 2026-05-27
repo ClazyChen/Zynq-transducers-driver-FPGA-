@@ -19,7 +19,7 @@ import chisel3.util._
   *   - bram_addr + bram_ren presented on cycle N
   *   - bram_data valid on cycle N+1
   */
-class BramReader(bramDepth: Int = 1024) extends Module {
+class BramReader(bramDepth: Int = 262144) extends Module {
 
     require(bramDepth % 64 == 0, s"bramDepth ($bramDepth) must be a multiple of 64")
     val frameSlots = bramDepth / 64
