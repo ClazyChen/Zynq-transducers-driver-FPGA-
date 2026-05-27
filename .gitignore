@@ -40,3 +40,5 @@ venv/
 host/loopback_output/*.png
 host/loopback_output/*.json
 host/test_field.png
+*.exe
+*.zip
