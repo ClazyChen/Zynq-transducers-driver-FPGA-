@@ -152,7 +152,7 @@ python main.py
 
 ### 数据格式与发送策略
 
-上位机以 **~40 kHz 平均速率** 向设备送帧：约每 **12.8 ms**（512/40000 s）唤醒一次，根据距上次发送的时间差计算本批帧数 `n = round(Δt × 40000)`（至少 1 帧），通过 **一次 TCP 写入** 发送 `n × 256` 字节。**每次 Start 后首包** 至少发送 `BURST_NOMINAL_FRAMES × BURST_PRIME_MULTIPLIER` 帧（默认 512×2=1024），用于垫高 BRAM 环，便于 PS 侧简化实现（见 `docs/ps_minimal_tcp_bram.md`）。LM 图案在 `configure()` 时预推理（去重后约数十个），运行时按全局帧序号查表；同一 LM 步在 40 kHz 流上持有约 `40000/(lm_freq×lm_samples)` 帧。
+上位机以 **~40 kHz 平均速率**（约 **10.2 MB/s**）向设备送帧；`configure()` 时预计算 BRAM 模板，运行时向量化组批，避免 Python 逐帧循环成为瓶颈：约每 **12.8 ms**（512/40000 s）唤醒一次，根据距上次发送的时间差计算本批帧数 `n = round(Δt × 40000)`（至少 1 帧），通过 **一次 TCP 写入** 发送 `n × 256` 字节。**每次 Start 后首包** 至少发送 `BURST_NOMINAL_FRAMES × BURST_PRIME_MULTIPLIER` 帧（默认 512×2=1024），用于垫高 BRAM 环，便于 PS 侧简化实现（见 `docs/ps_minimal_tcp_bram.md`）。LM 图案在 `configure()` 时预推理（去重后约数十个），运行时按全局帧序号查表；同一 LM 步在 40 kHz 流上持有约 `40000/(lm_freq×lm_samples)` 帧。
 
 每帧 64 个 32-bit 整数（little-endian），对应 FPGA BRAM 的 64 行：
 

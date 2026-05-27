@@ -17,6 +17,7 @@ class ParamPanel(QWidget):
     lm_params_changed = Signal(dict)          # {freq, amp, samples, direction}
     dwell_time_changed = Signal(int)          # ms
     connect_requested = Signal(str, int)      # ip, port
+    disconnect_requested = Signal()
     start_requested = Signal()
     stop_requested = Signal()
 
@@ -106,9 +107,15 @@ class ParamPanel(QWidget):
         self._port_edit.setValue(55555)
         net_layout.addWidget(self._port_edit, 1, 1)
 
+        conn_row = QHBoxLayout()
         self._btn_connect = QPushButton("连接")
         self._btn_connect.clicked.connect(self._on_connect)
-        net_layout.addWidget(self._btn_connect, 2, 0, 1, 2)
+        self._btn_disconnect = QPushButton("断开")
+        self._btn_disconnect.setEnabled(False)
+        self._btn_disconnect.clicked.connect(self._on_disconnect)
+        conn_row.addWidget(self._btn_connect)
+        conn_row.addWidget(self._btn_disconnect)
+        net_layout.addLayout(conn_row, 2, 0, 1, 2)
 
         net_group.setLayout(net_layout)
         layout.addWidget(net_group)
@@ -156,6 +163,9 @@ class ParamPanel(QWidget):
         port = self._port_edit.value()
         self.connect_requested.emit(ip, port)
 
+    def _on_disconnect(self):
+        self.disconnect_requested.emit()
+
     def _on_start(self):
         self.start_requested.emit()
         self._btn_start.setEnabled(False)
@@ -168,6 +178,9 @@ class ParamPanel(QWidget):
 
     def set_connected(self, connected: bool):
         self._btn_connect.setEnabled(not connected)
+        self._btn_disconnect.setEnabled(connected)
+        self._ip_edit.setEnabled(not connected)
+        self._port_edit.setEnabled(not connected)
         self._btn_start.setEnabled(connected)
         if not connected:
             self._btn_start.setEnabled(False)

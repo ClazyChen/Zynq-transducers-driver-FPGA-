@@ -56,6 +56,8 @@ class RenderController(QObject):
         self._precomputed_phases: Optional[np.ndarray] = None
         self._precomputed_amplitudes: Optional[np.ndarray] = None
         self._playback_sequence: Optional[List[int]] = None
+        self._sequence_arr: Optional[np.ndarray] = None
+        self._bram_templates: Optional[np.ndarray] = None
         self._dynamic_focus_data: Optional[List[Dict]] = None
         self._frames_per_lm_step: int = 1
         self._frames_per_dwell: int = 1
@@ -133,6 +135,10 @@ class RenderController(QObject):
             self._precomputed_phases = phases
             self._precomputed_amplitudes = amplitudes
             self._playback_sequence = sequence
+            self._sequence_arr = np.asarray(sequence, dtype=np.intp)
+            self._bram_templates = self.converter.convert_patterns_batch(
+                phases, amplitudes
+            )
             self._dynamic_focus_data = None
 
         else:
@@ -160,16 +166,24 @@ class RenderController(QObject):
             self._dynamic_focus_data = []
             for meta in per_focus_meta:
                 n = meta["n_unique"]
+                p_slice = phases[idx: idx + n]
+                a_slice = amplitudes[idx: idx + n]
                 self._dynamic_focus_data.append({
-                    "phases": phases[idx: idx + n],
-                    "amplitudes": amplitudes[idx: idx + n],
+                    "phases": p_slice,
+                    "amplitudes": a_slice,
                     "sequence": meta["sequence"],
+                    "sequence_arr": np.asarray(meta["sequence"], dtype=np.intp),
+                    "bram_templates": self.converter.convert_patterns_batch(
+                        p_slice, a_slice
+                    ),
                 })
                 idx += n
 
             self._precomputed_phases = None
             self._precomputed_amplitudes = None
             self._playback_sequence = None
+            self._sequence_arr = None
+            self._bram_templates = None
 
     def _deduplicate_configs(
         self,
@@ -196,39 +210,43 @@ class RenderController(QObject):
             return self.unet_engine.infer(configs)
         return self.gs_pat_engine.infer(configs)
 
-    def _resolve_pattern(self, frame_idx: int) -> Tuple[np.ndarray, np.ndarray, Optional[int]]:
-        """Return (phase, amplitude, focus_idx) for a global frame index."""
+    def _build_bram_batch(self, global_frame_start: int, n: int) -> np.ndarray:
+        """Assemble (n, 64) uint32 BRAM rows from precomputed templates."""
+        idx = np.arange(n, dtype=np.int64) + global_frame_start
+        ci = (np.arange(n, dtype=np.uint32) + np.uint32(self._cycle_index)) & np.uint32(
+            0xFFFF
+        )
+        ci_col = (ci << np.uint32(16))[:, np.newaxis]
+
         if self.mode == "static":
-            seq = self._playback_sequence
-            assert seq is not None
-            lm_step = (frame_idx // self._frames_per_lm_step) % len(seq)
-            si = seq[lm_step]
-            return (
-                self._precomputed_phases[si],
-                self._precomputed_amplitudes[si],
-                None,
-            )
+            assert self._sequence_arr is not None and self._bram_templates is not None
+            lm_steps = (idx // self._frames_per_lm_step) % len(self._sequence_arr)
+            si = self._sequence_arr[lm_steps]
+            return self._bram_templates[si] | ci_col
 
         assert self._dynamic_focus_data is not None
         num_foci = len(self._dynamic_focus_data)
-        focus_idx = (frame_idx // self._frames_per_dwell) % num_foci
-        frame_in_dwell = frame_idx % self._frames_per_dwell
-        data = self._dynamic_focus_data[focus_idx]
-        seq = data["sequence"]
-        lm_step = (frame_in_dwell // self._frames_per_lm_step) % len(seq)
-        si = seq[lm_step]
-        return data["phases"][si], data["amplitudes"][si], focus_idx
+        focus_idx = (idx // self._frames_per_dwell) % num_foci
+        frame_in_dwell = idx % self._frames_per_dwell
+        bram = np.empty((n, 64), dtype=np.uint32)
 
-    def _build_batch(
-        self, global_frame_start: int, n: int
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        phase_batch = np.empty((n, 8, 8), dtype=np.float64)
-        amp_batch = np.empty((n, 8, 8), dtype=np.float64)
-        for i in range(n):
-            phase, amplitude, _ = self._resolve_pattern(global_frame_start + i)
-            phase_batch[i] = phase
-            amp_batch[i] = amplitude
-        return phase_batch, amp_batch
+        for f, data in enumerate(self._dynamic_focus_data):
+            mask = focus_idx == f
+            if not np.any(mask):
+                continue
+            seq_arr = data["sequence_arr"]
+            lm_steps = (frame_in_dwell[mask] // self._frames_per_lm_step) % len(seq_arr)
+            si = seq_arr[lm_steps]
+            bram[mask] = data["bram_templates"][si]
+
+        return bram | ci_col
+
+    def _last_focus_idx(self, global_frame_end: int) -> Optional[int]:
+        if self.mode != "dynamic" or global_frame_end < 0:
+            return None
+        idx = np.int64(global_frame_end)
+        num_foci = len(self._dynamic_focus_data)
+        return int((idx // self._frames_per_dwell) % num_foci)
 
     def start(self):
         if self._thread is not None and self._thread.is_alive():
@@ -282,18 +300,18 @@ class RenderController(QObject):
                 n = max(n, prime_min)
                 self._first_burst = False
 
-            phase_batch, amp_batch = self._build_batch(global_frame, n)
-            bram_batch = self.converter.convert_batch(
-                phase_batch, amp_batch, self._cycle_index
-            )
+            t_build = time.perf_counter()
+            bram_batch = self._build_bram_batch(global_frame, n)
+            t_after_build = time.perf_counter()
 
             ok = self.device_client.send_burst(bram_batch)
+            t_after_send = time.perf_counter()
             if not ok:
                 self.connection_status.emit("发送失败")
                 break
 
             if self.mode == "dynamic":
-                _, _, focus_idx = self._resolve_pattern(global_frame + n - 1)
+                focus_idx = self._last_focus_idx(global_frame + n - 1)
                 if focus_idx is not None and focus_idx != last_focus_idx:
                     last_focus_idx = focus_idx
                     num_foci = len(self._dynamic_focus_data)
@@ -303,14 +321,43 @@ class RenderController(QObject):
             global_frame += n
             last_anchor += n / cfg.DEVICE_SAMPLE_RATE
 
-            self._maybe_compute_field(phase_batch[-1], amp_batch[-1])
+            if self.field_builder is not None and n > 0:
+                last_g = global_frame - 1
+                if self.mode == "static":
+                    lm_steps = (last_g // self._frames_per_lm_step) % len(
+                        self._sequence_arr
+                    )
+                    si = self._sequence_arr[lm_steps]
+                    self._maybe_compute_field(
+                        self._precomputed_phases[si],
+                        self._precomputed_amplitudes[si],
+                    )
+                else:
+                    fi = self._last_focus_idx(last_g)
+                    if fi is not None:
+                        fid = last_g % self._frames_per_dwell
+                        data = self._dynamic_focus_data[fi]
+                        seq_arr = data["sequence_arr"]
+                        lm_steps = (fid // self._frames_per_lm_step) % len(seq_arr)
+                        si = seq_arr[lm_steps]
+                        self._maybe_compute_field(
+                            data["phases"][si], data["amplitudes"][si]
+                        )
 
             frame_count += n
+            bytes_sent = n * 256
             now = time.perf_counter()
             elapsed = now - fps_start_time
             if elapsed >= 1.0:
                 fps = frame_count / elapsed
                 self.fps_updated.emit(fps)
+                mbps = (frame_count * 256) / elapsed / 1e6
+                build_ms = (t_after_build - t_build) * 1000.0
+                send_ms = (t_after_send - t_after_build) * 1000.0
+                print(
+                    f"[Renderer] {fps:.0f} fps, {mbps:.2f} MB/s "
+                    f"(build {build_ms:.1f} ms, send {send_ms:.1f} ms per last burst)"
+                )
                 frame_count = 0
                 fps_start_time = now
 

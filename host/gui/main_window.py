@@ -51,6 +51,7 @@ class MainWindow(QMainWindow):
         self.param_panel.lm_params_changed.connect(self._on_config_changed)
         self.param_panel.dwell_time_changed.connect(self._on_config_changed)
         self.param_panel.connect_requested.connect(self._on_connect)
+        self.param_panel.disconnect_requested.connect(self._on_disconnect)
         self.param_panel.start_requested.connect(self._on_start)
         self.param_panel.stop_requested.connect(self._on_stop)
         right_layout.addWidget(self.param_panel)
@@ -184,6 +185,9 @@ class MainWindow(QMainWindow):
 
     def _on_connect(self, ip: str, port: int):
         """Handle connect button."""
+        if self.device_client.connected:
+            self._release_connection()
+
         mock = self.param_panel.is_mock()
         self.device_client.mock = mock
         self.device_client.host = ip
@@ -195,6 +199,21 @@ class MainWindow(QMainWindow):
             self._status_connection.setText(f"设备: {'模拟' if mock else '已连接'}")
         else:
             QMessageBox.critical(self, "连接失败", f"无法连接到 {ip}:{port}")
+
+    def _on_disconnect(self):
+        """Handle disconnect button (e.g. after PS ARM reflashed)."""
+        self._release_connection()
+        self.status_bar.showMessage("已断开设备连接", 3000)
+
+    def _release_connection(self):
+        """Stop streaming and close TCP; safe to call when already disconnected."""
+        if self.renderer.is_running():
+            self.renderer.stop()
+        self.device_client.disconnect()
+        self.param_panel.set_connected(False)
+        self.param_panel._btn_start.setEnabled(False)
+        self.param_panel._btn_stop.setEnabled(False)
+        self._status_connection.setText("设备: 未连接")
 
     def _on_start(self):
         """Handle start rendering button."""
@@ -210,6 +229,16 @@ class MainWindow(QMainWindow):
 
     def _on_device_status(self, status: str):
         """Callback from DeviceClient."""
+        if status in ("DISCONNECTED", "MOCK_DISCONNECTED"):
+            self.param_panel.set_connected(False)
+            self.param_panel._btn_start.setEnabled(False)
+            self.param_panel._btn_stop.setEnabled(False)
+            self._status_connection.setText("设备: 未连接")
+            return
+        if status.startswith("SEND_ERROR") or status.startswith("ERROR"):
+            self._release_connection()
+            self.status_bar.showMessage(f"连接异常: {status}", 5000)
+            return
         self._status_connection.setText(f"设备: {status}")
 
     def _on_renderer_status(self, msg: str):
@@ -219,7 +248,11 @@ class MainWindow(QMainWindow):
         self._status_fps.setText(f"FPS: {fps:.1f}")
 
     def _on_renderer_conn_status(self, status: str):
-        self._status_connection.setText(f"设备: {status}")
+        if status == "发送失败":
+            self._release_connection()
+            self.status_bar.showMessage("发送失败，已断开连接", 5000)
+        else:
+            self._status_connection.setText(f"设备: {status}")
 
     def _on_focus_info(self, info: str):
         self._status_mode.setText(f"模式: {info}")

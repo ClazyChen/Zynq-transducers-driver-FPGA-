@@ -3,12 +3,14 @@ TCP client for sending frame data to the Zynq device.
 """
 
 import socket
-import struct
 import time
 import threading
 from typing import Optional, Callable
 
 import numpy as np
+
+# Large send buffer helps sustain ~10 MB/s bursts on Windows
+TCP_SNDBUF_SIZE = 1 << 20
 
 
 class DeviceClient:
@@ -39,6 +41,9 @@ class DeviceClient:
 
     def connect(self) -> bool:
         """Establish TCP connection to the device."""
+        if self._connected:
+            self.disconnect()
+
         if self.mock:
             self._connected = True
             self._notify_status("MOCK_CONNECTED")
@@ -46,6 +51,10 @@ class DeviceClient:
 
         try:
             self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self._socket.setsockopt(
+                socket.SOL_SOCKET, socket.SO_SNDBUF, TCP_SNDBUF_SIZE
+            )
             self._socket.settimeout(5.0)
             self._socket.connect((self.host, self.port))
             self._socket.settimeout(None)
@@ -58,21 +67,24 @@ class DeviceClient:
             return False
 
     def disconnect(self):
-        """Close TCP connection."""
-        if self.mock:
-            self._connected = False
-            self._notify_status("MOCK_DISCONNECTED")
-            return
-
+        """Close TCP connection so PS can be reflashed and PC can reconnect."""
+        was_mock = self.mock
         with self._lock:
             if self._socket:
+                try:
+                    self._socket.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
                 try:
                     self._socket.close()
                 except Exception:
                     pass
                 self._socket = None
             self._connected = False
-        self._notify_status("DISCONNECTED")
+        if was_mock:
+            self._notify_status("MOCK_DISCONNECTED")
+        else:
+            self._notify_status("DISCONNECTED")
 
     def send_burst(self, bram_rows_batch: np.ndarray) -> bool:
         """Send multiple frames in one TCP write.
