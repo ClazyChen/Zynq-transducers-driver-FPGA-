@@ -39,7 +39,7 @@ A/B 两帧缓冲交替工作：OutputDriver 输出当前周期数据的同时，
 BRAM 每 64 行数据的头部携带 16bit 周期序号。FPGA 维护 `expectedCycle`，严格匹配才消费数据；失配则整周期输出全 0，换能器处于安全关闭状态。
 
 **周期回绕对齐（关键）**
-BRAM 深度约束为 `64 × 2^m`（如 1024、4096、65536）。这使得 16bit 周期序号回绕（约 1.64s）后，同一周期必然落到同一物理地址。临时超速写入导致的覆盖将在 1.64s 后自动恢复同步。
+BRAM 深度约束为 `64 × 2^m`（默认 **262144** 字 = **4096** 帧槽，约 102 ms @40 kHz）。这使得 16bit 周期序号回绕（约 1.64s）后，同一周期必然落到同一物理地址。临时超速写入导致的覆盖将在 1.64s 后自动恢复同步（环缓覆盖为预期行为，不做写前检查）。
 
 **RCLK 时序重叠**
 RCLK 上升沿与最后一 SRCLK 下降沿同时产生，RCLK 高电平期间允许与下一帧的第一个 SRCLK 低电平完全重叠。这使 30 分频下 8×30×100ns = 24μs 刚好嵌入 25μs 周期，剩余 1μs 为周期间隔。
@@ -69,7 +69,7 @@ sbt "runMain ultrasound.GenerateVerilog"   # 生成 Top.sv
 ```verilog
 input         clock, reset;
 input  [31:0] io_bramData;      // BRAM 读数据
-output [9:0]  io_bramAddr;      // BRAM 读地址（宽度随 bramDepth 变化）
+output [17:0] io_bramAddr;      // BRAM 读地址（宽度随 bramDepth 变化，262144 时为 18 位）
 output        io_bramRen;       // BRAM 读使能
 output        io_ser_0..7;      // 8 路移位寄存器串行输入
 output        io_srclk;         // 移位时钟
@@ -150,9 +150,11 @@ python main.py
    - 状态栏显示当前 FPS、连接状态和渲染模式
    - 点击 **Stop Rendering** 停止
 
-### 数据格式
+### 数据格式与发送策略
 
-上位机通过 TCP 发送裸二进制数据，每帧 64 个 32-bit 整数（little-endian），对应 FPGA BRAM 的 64 行：
+上位机以 **~40 kHz 平均速率** 向设备送帧：约每 **12.8 ms**（512/40000 s）唤醒一次，根据距上次发送的时间差计算本批帧数 `n = round(Δt × 40000)`（至少 1 帧），通过 **一次 TCP 写入** 发送 `n × 256` 字节。**每次 Start 后首包** 至少发送 `BURST_NOMINAL_FRAMES × BURST_PRIME_MULTIPLIER` 帧（默认 512×2=1024），用于垫高 BRAM 环，便于 PS 侧简化实现（见 `docs/ps_minimal_tcp_bram.md`）。LM 图案在 `configure()` 时预推理（去重后约数十个），运行时按全局帧序号查表；同一 LM 步在 40 kHz 流上持有约 `40000/(lm_freq×lm_samples)` 帧。
+
+每帧 64 个 32-bit 整数（little-endian），对应 FPGA BRAM 的 64 行：
 
 ```
 [31:16] cycle_index (16-bit unsigned, 严格递增)
@@ -191,9 +193,9 @@ python main.py
 | `host/main.py` | 入口点 |
 | `host/config.py` | 全局常量（物理参数、FPGA 参数、默认值） |
 | `host/algorithms/engine.py` | U-Net / GS-PAT 推理引擎封装 |
-| `host/core/renderer.py` | 实时渲染循环（LM 轨迹生成 + batch 推理 + 发送） |
+| `host/core/renderer.py` | 实时渲染循环（LM 预推理 + 40 kHz 块发送） |
 | `host/core/converter.py` | phase/amplitude → BRAM 格式转换 |
-| `host/core/device_client.py` | TCP 客户端 |
+| `host/core/device_client.py` | TCP 客户端（`send_burst` 变长块） |
 | `host/gui/main_window.py` | 主窗口组装 |
 | `host/gui/focus_panel.py` | 焦点配置 + 2D 可视化 |
 | `host/gui/param_panel.py` | 算法/LM/网络参数 |

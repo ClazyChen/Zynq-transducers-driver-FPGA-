@@ -63,8 +63,13 @@ def test_device_client_mock():
     assert client.send_frame(1, rows)
     assert client.send_frame(2, rows)
 
+    batch = np.stack([rows, rows + 1], axis=0)
+    batch[0, 0] = (1 << 16) | (batch[0, 0] & 0xFFFF)
+    batch[1, 0] = (2 << 16) | (batch[1, 0] & 0xFFFF)
+    assert client.send_burst(batch)
+
     stats = client.get_stats()
-    assert stats["frames_sent"] == 2
+    assert stats["frames_sent"] == 4
     assert stats["connected"]
 
     client.disconnect()

@@ -74,6 +74,51 @@ class DeviceClient:
             self._connected = False
         self._notify_status("DISCONNECTED")
 
+    def send_burst(self, bram_rows_batch: np.ndarray) -> bool:
+        """Send multiple frames in one TCP write.
+
+        Args:
+            bram_rows_batch: (N, 64) uint32 array; row0 of each frame must
+                already contain the correct cycle_index in [31:16].
+
+        Returns:
+            True if sent successfully
+        """
+        if not self._connected:
+            return False
+
+        if bram_rows_batch.dtype != np.uint32:
+            bram_rows_batch = bram_rows_batch.astype(np.uint32)
+
+        if bram_rows_batch.ndim != 2 or bram_rows_batch.shape[1] != 64:
+            raise ValueError(
+                f"bram_rows_batch must be (N, 64), got {bram_rows_batch.shape}"
+            )
+
+        n = bram_rows_batch.shape[0]
+        if n == 0:
+            return True
+
+        data = bram_rows_batch.tobytes()
+
+        if self.mock:
+            self._frames_sent += n
+            self._last_send_time = time.perf_counter()
+            return True
+
+        with self._lock:
+            if self._socket is None:
+                return False
+            try:
+                self._socket.sendall(data)
+                self._frames_sent += n
+                self._last_send_time = time.perf_counter()
+                return True
+            except Exception as e:
+                self._connected = False
+                self._notify_status(f"SEND_ERROR: {e}")
+                return False
+
     def send_frame(
         self,
         cycle_index: int,
@@ -88,39 +133,15 @@ class DeviceClient:
         Returns:
             True if sent successfully
         """
-        if not self._connected:
-            return False
-
         if bram_rows.dtype != np.uint32:
             bram_rows = bram_rows.astype(np.uint32)
 
         if bram_rows.shape != (64,):
             raise ValueError(f"bram_rows must be (64,), got {bram_rows.shape}")
 
-        # Ensure row0 has the correct cycle index
         bram_rows = bram_rows.copy()
         bram_rows[0] = (bram_rows[0] & 0x0000FFFF) | ((cycle_index & 0xFFFF) << 16)
-
-        # Pack as little-endian uint32
-        data = bram_rows.tobytes()
-
-        if self.mock:
-            self._frames_sent += 1
-            self._last_send_time = time.perf_counter()
-            return True
-
-        with self._lock:
-            if self._socket is None:
-                return False
-            try:
-                self._socket.sendall(data)
-                self._frames_sent += 1
-                self._last_send_time = time.perf_counter()
-                return True
-            except Exception as e:
-                self._connected = False
-                self._notify_status(f"SEND_ERROR: {e}")
-                return False
+        return self.send_burst(bram_rows.reshape(1, 64))
 
     def get_stats(self) -> dict:
         """Return connection statistics."""

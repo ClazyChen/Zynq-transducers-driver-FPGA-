@@ -19,7 +19,7 @@ class Top(
     srclkHighCycs: Int = 5,
     rclkHighCycs: Int = 5,
     cycleCycs: Int = 2500,
-    bramDepth: Int = 1024
+    bramDepth: Int = 262144
 ) extends Module {
 
     val phaseDutyBits = log2Ceil(div)
