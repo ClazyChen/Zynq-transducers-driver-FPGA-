@@ -35,6 +35,9 @@ class Top(
         val ser   = Output(Vec(8, Bool()))
         val srclk = Output(Bool())
         val rclk  = Output(Bool())
+
+        // 40 kHz cycle boundary (BRAM read trigger); useful for simulation / ILA
+        val cycleStart = Output(Bool())
     })
 
     // ------------------------------------------------------------------
@@ -82,4 +85,5 @@ class Top(
     io.ser   := outputDriver.io.ser
     io.srclk := outputDriver.io.srclk
     io.rclk  := outputDriver.io.rclk
+    io.cycleStart := outputDriver.io.cycleStart
 }

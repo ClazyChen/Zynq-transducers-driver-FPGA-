@@ -58,9 +58,14 @@ RCLK 上升沿与最后一 SRCLK 下降沿同时产生，RCLK 高电平期间允
 ### 构建
 
 ```bash
-sbt test                    # 运行全部 16 个测试
+sbt test                    # 运行全部 Scala 测试
+sbt "testOnly ultrasound.TopSerLoopbackSpec -- -z smoke"   # 快速 SER 环回（DIV=4）
+sbt "testOnly ultrasound.TopSerLoopbackSpec -- -z unet_1focus_center"   # 单帧 BRAM 全路径（DIV=30）
+# 可选 VCD（ILA 软件孪生）：set TOP_SER_DUMP_VCD=1 后运行含 VCD 的用例
 sbt "runMain ultrasound.GenerateVerilog"   # 生成 Top.sv
 ```
+
+**`TopSerLoopbackSpec`**：将 `host/loopback_output/*_bram.bin` 经完整 `Top` 送到 `io_ser`，按列采样重建 PWM 位图并与 LUT 比对；`io_cycleStart` 可用于仿真/ILA 对齐 40 kHz 边界。需先运行 `python host/tests/end_to_end_loopback.py` 生成 BRAM 文件。
 
 生成的 Verilog 位于 `generated/Top.sv`，使用 `--preserve-aggregate=1d-vec` 保留数组结构、`--disable-all-randomization` 去除随机化宏。
 
@@ -74,6 +79,7 @@ output        io_bramRen;       // BRAM 读使能
 output        io_ser_0..7;      // 8 路移位寄存器串行输入
 output        io_srclk;         // 移位时钟
 output        io_rclk;          // 锁存时钟
+output        io_cycleStart;    // 40 kHz 周期边界（BRAM 读触发）
 ```
 
 具体参数与内部时序逻辑详见各 `.scala` 源文件头部注释。

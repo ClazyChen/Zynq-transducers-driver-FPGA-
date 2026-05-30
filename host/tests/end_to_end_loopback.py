@@ -6,7 +6,8 @@ Tests the full chain:
   → Inverse converter → Reconstructed field
   → Comparison with original reference field
 
-Also generates BRAM binary files for Scala-side loopback verification.
+Also generates BRAM binary files for Scala-side loopback verification
+(BramFileLoopbackSpec: DataMapper path; TopSerLoopbackSpec: full Top + SER).
 """
 
 import sys
