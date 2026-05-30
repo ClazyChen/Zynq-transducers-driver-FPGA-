@@ -94,6 +94,58 @@ def test_renderer_static():
     return True
 
 
+def test_renderer_static_with_envelope():
+    print("Testing RenderController (static + amplitude envelope)...")
+
+    unet = UNetEngine(str(cfg.CHECKPOINT_PATH), base_channels=cfg.UNET_BASE_CHANNELS, use_compile=False)
+    gs = GSPATEngine()
+    client = DeviceClient(mock=True)
+    client.connect()
+
+    renderer = RenderController(unet, gs, client, field_builder=None)
+    renderer.configure(
+        foci=[(64.0, 64.0)],
+        mode="static",
+        algorithm="unet",
+        lm_freq=25.0,
+        lm_amp=4.0,
+        lm_samples=12,
+        lm_direction="x",
+        dwell_time_ms=500,
+        envelope_enabled=True,
+        envelope_freq=1.0,
+        envelope_depth=1.0,
+    )
+
+    quarter = int(round(cfg.DEVICE_SAMPLE_RATE / 4.0))
+    three_quarter = int(round(cfg.DEVICE_SAMPLE_RATE * 3.0 / 4.0))
+    high_gain = renderer._build_bram_batch(quarter, 1)
+    low_gain = renderer._build_bram_batch(three_quarter, 1)
+    assert not np.array_equal(high_gain, low_gain), (
+        "Envelope should change BRAM rows between high and low gain phases"
+    )
+
+    captured = []
+    orig_send_burst = client.send_burst
+
+    def capture_burst(batch):
+        captured.append(batch.copy())
+        return orig_send_burst(batch)
+
+    client.send_burst = capture_burst
+
+    renderer.start()
+    time.sleep(0.5)
+    renderer.stop()
+
+    frames = _expand_burst_frames(captured)
+    print(f"  Captured {len(frames)} frames with envelope enabled")
+    assert len(frames) >= 500, f"Expected >=500 frames in 0.5s, got {len(frames)}"
+
+    print("  Static + envelope OK\n")
+    return True
+
+
 def test_renderer_dynamic():
     print("Testing RenderController (dynamic mode)...")
 
@@ -143,6 +195,7 @@ if __name__ == "__main__":
 
     all_ok = True
     all_ok &= test_renderer_static()
+    all_ok &= test_renderer_static_with_envelope()
     all_ok &= test_renderer_dynamic()
 
     if all_ok:

@@ -52,6 +52,9 @@ class RenderController(QObject):
         self.lm_samples: int = 12
         self.lm_direction: str = "x"
         self.dwell_time_ms: float = 500.0
+        self.envelope_enabled: bool = cfg.ENVELOPE_DEFAULT_ENABLED
+        self.envelope_freq: float = cfg.ENVELOPE_DEFAULT_FREQUENCY
+        self.envelope_depth: float = cfg.ENVELOPE_DEFAULT_DEPTH
 
         self._precomputed_phases: Optional[np.ndarray] = None
         self._precomputed_amplitudes: Optional[np.ndarray] = None
@@ -77,6 +80,9 @@ class RenderController(QObject):
         lm_samples: int = 12,
         lm_direction: str = "x",
         dwell_time_ms: float = 500.0,
+        envelope_enabled: bool = cfg.ENVELOPE_DEFAULT_ENABLED,
+        envelope_freq: float = cfg.ENVELOPE_DEFAULT_FREQUENCY,
+        envelope_depth: float = cfg.ENVELOPE_DEFAULT_DEPTH,
     ):
         """Update rendering configuration and precompute trajectories."""
         if len(foci) == 0 or len(foci) > 3:
@@ -89,6 +95,10 @@ class RenderController(QObject):
             raise ValueError("lm_samples 必须 >= 2")
         if lm_direction not in ("x", "y"):
             raise ValueError("lm_direction 必须是 'x' 或 'y'")
+        if envelope_freq <= 0:
+            raise ValueError("envelope_freq 必须 > 0")
+        if not (0.0 <= envelope_depth <= 1.0):
+            raise ValueError("envelope_depth 必须在 0 到 1 之间")
 
         self.foci = [(float(x), float(y)) for x, y in foci]
         self.mode = mode
@@ -98,6 +108,9 @@ class RenderController(QObject):
         self.lm_samples = lm_samples
         self.lm_direction = lm_direction
         self.dwell_time_ms = dwell_time_ms
+        self.envelope_enabled = envelope_enabled
+        self.envelope_freq = envelope_freq
+        self.envelope_depth = envelope_depth
 
         self._precompute()
         self.status_message.emit(f"已配置: {len(foci)} 个焦点, {mode} 模式, {algorithm}")
@@ -210,6 +223,14 @@ class RenderController(QObject):
             return self.unet_engine.infer(configs)
         return self.gs_pat_engine.infer(configs)
 
+    def _envelope_gain(self, global_frames: np.ndarray) -> np.ndarray:
+        """Sinusoidal global amplitude gain: (1-depth) .. 1 over each period."""
+        if not self.envelope_enabled or self.envelope_depth <= 0:
+            return np.ones(len(global_frames), dtype=np.float32)
+        t = global_frames.astype(np.float64) / cfg.DEVICE_SAMPLE_RATE
+        s = 0.5 * (1.0 + np.sin(2.0 * np.pi * self.envelope_freq * t))
+        return (1.0 - self.envelope_depth + self.envelope_depth * s).astype(np.float32)
+
     def _build_bram_batch(self, global_frame_start: int, n: int) -> np.ndarray:
         """Assemble (n, 64) uint32 BRAM rows from precomputed templates."""
         idx = np.arange(n, dtype=np.int64) + global_frame_start
@@ -217,11 +238,19 @@ class RenderController(QObject):
             0xFFFF
         )
         ci_col = (ci << np.uint32(16))[:, np.newaxis]
+        use_envelope = self.envelope_enabled and self.envelope_depth > 0
+        gain = self._envelope_gain(idx) if use_envelope else None
 
         if self.mode == "static":
             assert self._sequence_arr is not None and self._bram_templates is not None
             lm_steps = (idx // self._frames_per_lm_step) % len(self._sequence_arr)
             si = self._sequence_arr[lm_steps]
+            if use_envelope:
+                assert self._precomputed_phases is not None
+                assert self._precomputed_amplitudes is not None
+                phases = self._precomputed_phases[si]
+                amps = self._precomputed_amplitudes[si] * gain[:, np.newaxis, np.newaxis]
+                return self.converter.convert_patterns_batch(phases, amps) | ci_col
             return self._bram_templates[si] | ci_col
 
         assert self._dynamic_focus_data is not None
@@ -237,7 +266,13 @@ class RenderController(QObject):
             seq_arr = data["sequence_arr"]
             lm_steps = (frame_in_dwell[mask] // self._frames_per_lm_step) % len(seq_arr)
             si = seq_arr[lm_steps]
-            bram[mask] = data["bram_templates"][si]
+            if use_envelope:
+                g = gain[mask]
+                phases = data["phases"][si]
+                amps = data["amplitudes"][si] * g[:, np.newaxis, np.newaxis]
+                bram[mask] = self.converter.convert_patterns_batch(phases, amps)
+            else:
+                bram[mask] = data["bram_templates"][si]
 
         return bram | ci_col
 
@@ -323,6 +358,7 @@ class RenderController(QObject):
 
             if self.field_builder is not None and n > 0:
                 last_g = global_frame - 1
+                env_gain = float(self._envelope_gain(np.array([last_g], dtype=np.int64))[0])
                 if self.mode == "static":
                     lm_steps = (last_g // self._frames_per_lm_step) % len(
                         self._sequence_arr
@@ -330,7 +366,7 @@ class RenderController(QObject):
                     si = self._sequence_arr[lm_steps]
                     self._maybe_compute_field(
                         self._precomputed_phases[si],
-                        self._precomputed_amplitudes[si],
+                        self._precomputed_amplitudes[si] * env_gain,
                     )
                 else:
                     fi = self._last_focus_idx(last_g)
@@ -341,7 +377,8 @@ class RenderController(QObject):
                         lm_steps = (fid // self._frames_per_lm_step) % len(seq_arr)
                         si = seq_arr[lm_steps]
                         self._maybe_compute_field(
-                            data["phases"][si], data["amplitudes"][si]
+                            data["phases"][si],
+                            data["amplitudes"][si] * env_gain,
                         )
 
             frame_count += n

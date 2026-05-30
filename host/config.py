@@ -39,6 +39,11 @@ LM_DEFAULT_AMPLITUDE = 4.0      # mm
 LM_DEFAULT_SAMPLES_PER_PERIOD = 12
 LM_DEFAULT_DIRECTION = "x"      # "x" or "y"
 
+# Amplitude envelope defaults (global sinusoidal gain on all transducers)
+ENVELOPE_DEFAULT_ENABLED = False
+ENVELOPE_DEFAULT_FREQUENCY = 1.0    # Hz
+ENVELOPE_DEFAULT_DEPTH = 1.0        # 0 = no modulation, 1 = full 0..1 swing
+
 # Rendering limits
 MAX_FOCI = 3
 MAX_SAMPLE_RATE = 40000.0       # Hz, transducer native frequency

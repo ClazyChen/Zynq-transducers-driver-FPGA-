@@ -152,6 +152,7 @@ class MainWindow(QMainWindow):
             algo = self.param_panel.get_algorithm()
             lm = self.param_panel.get_lm_params()
             dwell = self.param_panel.get_dwell_time_ms()
+            env = self.param_panel.get_envelope_params()
 
             # If U-Net is not available, force GS-PAT
             if algo == "unet" and self.unet_engine is None:
@@ -167,6 +168,9 @@ class MainWindow(QMainWindow):
                 lm_samples=lm["samples"],
                 lm_direction=lm["direction"],
                 dwell_time_ms=dwell,
+                envelope_enabled=env["enabled"],
+                envelope_freq=env["freq"],
+                envelope_depth=env["depth"],
             )
 
             self._status_algo.setText(f"算法: {'U-Net' if algo == 'unet' else 'GS-PAT'}")

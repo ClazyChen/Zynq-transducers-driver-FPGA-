@@ -5,9 +5,11 @@ Parameter configuration panel.
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit, QGroupBox,
-    QButtonGroup, QRadioButton, QGridLayout,
+    QButtonGroup, QRadioButton, QGridLayout, QCheckBox,
 )
 from PySide6.QtCore import Signal
+
+import config as cfg
 
 
 class ParamPanel(QWidget):
@@ -81,6 +83,35 @@ class ParamPanel(QWidget):
 
         lm_group.setLayout(lm_layout)
         layout.addWidget(lm_group)
+
+        # Amplitude envelope
+        env_group = QGroupBox("振幅包络")
+        env_layout = QGridLayout()
+
+        self._env_enabled = QCheckBox("启用正弦包络")
+        self._env_enabled.setChecked(cfg.ENVELOPE_DEFAULT_ENABLED)
+        self._env_enabled.stateChanged.connect(self._on_envelope_changed)
+        env_layout.addWidget(self._env_enabled, 0, 0, 1, 2)
+
+        env_layout.addWidget(QLabel("频率 (Hz):"), 1, 0)
+        self._env_freq = QDoubleSpinBox()
+        self._env_freq.setRange(0.1, 50.0)
+        self._env_freq.setValue(cfg.ENVELOPE_DEFAULT_FREQUENCY)
+        self._env_freq.setDecimals(2)
+        self._env_freq.valueChanged.connect(self._on_envelope_changed)
+        env_layout.addWidget(self._env_freq, 1, 1)
+
+        env_layout.addWidget(QLabel("深度 (%):"), 2, 0)
+        self._env_depth = QDoubleSpinBox()
+        self._env_depth.setRange(0.0, 100.0)
+        self._env_depth.setValue(cfg.ENVELOPE_DEFAULT_DEPTH * 100.0)
+        self._env_depth.setDecimals(0)
+        self._env_depth.setSingleStep(5.0)
+        self._env_depth.valueChanged.connect(self._on_envelope_changed)
+        env_layout.addWidget(self._env_depth, 2, 1)
+
+        env_group.setLayout(env_layout)
+        layout.addWidget(env_group)
 
         # Dynamic mode parameters
         dyn_group = QGroupBox("动态模式")
@@ -158,6 +189,9 @@ class ParamPanel(QWidget):
     def _on_dwell_changed(self):
         self.dwell_time_changed.emit(self._dwell_time.value())
 
+    def _on_envelope_changed(self):
+        self._on_lm_changed()
+
     def _on_connect(self):
         ip = self._ip_edit.text().strip()
         port = self._port_edit.value()
@@ -202,6 +236,13 @@ class ParamPanel(QWidget):
 
     def get_dwell_time_ms(self) -> int:
         return self._dwell_time.value()
+
+    def get_envelope_params(self) -> dict:
+        return {
+            "enabled": self._env_enabled.isChecked(),
+            "freq": self._env_freq.value(),
+            "depth": self._env_depth.value() / 100.0,
+        }
 
     def get_network_config(self) -> tuple:
         return self._ip_edit.text().strip(), self._port_edit.value()

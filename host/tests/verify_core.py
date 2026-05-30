@@ -10,6 +10,64 @@ import numpy as np
 
 from core.converter import ControlMatrixConverter
 from core.device_client import DeviceClient
+from core.renderer import RenderController
+
+import config as cfg
+
+
+def test_envelope_gain():
+    print("Testing amplitude envelope gain...")
+    unet = None
+    gs = None
+    client = DeviceClient(mock=True)
+    renderer = RenderController(unet, gs, client, field_builder=None)
+
+    renderer.envelope_enabled = False
+    g = renderer._envelope_gain(np.array([0, 1000], dtype=np.int64))
+    assert np.allclose(g, 1.0), f"disabled envelope should be all 1, got {g}"
+
+    renderer.envelope_enabled = True
+    renderer.envelope_depth = 0.0
+    g = renderer._envelope_gain(np.array([0], dtype=np.int64))
+    assert g[0] == 1.0, f"depth=0 should be 1, got {g[0]}"
+
+    renderer.envelope_depth = 1.0
+    renderer.envelope_freq = 1.0
+    g_mid = renderer._envelope_gain(np.array([0], dtype=np.int64))[0]
+    assert abs(g_mid - 0.5) < 1e-5, f"depth=1 at t=0 should be ~0.5, got {g_mid}"
+
+    quarter_period_frames = int(round(cfg.DEVICE_SAMPLE_RATE / 4.0))
+    g_max = renderer._envelope_gain(np.array([quarter_period_frames], dtype=np.int64))[0]
+    assert abs(g_max - 1.0) < 1e-5, f"depth=1 at quarter period should be ~1, got {g_max}"
+
+    three_quarter_frames = int(round(cfg.DEVICE_SAMPLE_RATE * 3.0 / 4.0))
+    g_min = renderer._envelope_gain(np.array([three_quarter_frames], dtype=np.int64))[0]
+    assert abs(g_min) < 1e-5, f"depth=1 at 3/4 period should be ~0, got {g_min}"
+
+    renderer.envelope_depth = 0.5
+    g_half = renderer._envelope_gain(np.array([0], dtype=np.int64))[0]
+    assert abs(g_half - 0.75) < 1e-5, f"depth=0.5 at t=0 should be ~0.75, got {g_half}"
+
+    print("  Envelope gain OK")
+    return True
+
+
+def test_envelope_duty_quantization():
+    print("Testing envelope duty quantization...")
+    conv = ControlMatrixConverter(div=30)
+    phase = np.zeros((1, 8, 8), dtype=np.float32)
+    amplitude = np.ones((1, 8, 8), dtype=np.float32)
+
+    rows_full = conv.convert_patterns_batch(phase, amplitude)
+    duty_full = (rows_full[0, 0] >> 8) & 0xFF
+    assert duty_full == 15, f"full amplitude duty should be 15, got {duty_full}"
+
+    rows_zero = conv.convert_patterns_batch(phase, amplitude * 0.0)
+    duty_zero = (rows_zero[0, 0] >> 8) & 0xFF
+    assert duty_zero == 0, f"zero amplitude duty should be 0, got {duty_zero}"
+
+    print("  Envelope duty quantization OK")
+    return True
 
 
 def test_converter():
@@ -81,6 +139,8 @@ def test_device_client_mock():
 if __name__ == "__main__":
     all_ok = True
     all_ok &= test_converter()
+    all_ok &= test_envelope_gain()
+    all_ok &= test_envelope_duty_quantization()
     all_ok &= test_device_client_mock()
 
     if all_ok:
